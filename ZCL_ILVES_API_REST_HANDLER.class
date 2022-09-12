@@ -1,0 +1,181 @@
+***********************************************************************
+* Class           : ZCL_CRM_REST_HANDLER                              *
+* Package         : ZML_SHARED                                        *
+*                                                                     *
+* Author          : Michal Brulinski, Tieto                           *
+*                                                                     *
+* Description     : Initialize instance of HTTP Client                *
+*                   and set its header fields                         *
+*                   Uses REST client to retrieve the data.            *
+*                                                                     *
+* Change history:                                                     *
+* Date       // Author                    // Description              *
+* ------------------------------------------------------------------- *
+* 28.04.2022 // Michal Brulinski, Tieto   // First version created    *
+*                                                                     *
+***********************************************************************
+CLASS zcl_ilves_api_rest_handler DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC INHERITING FROM zcl_rest_handler_base.
+
+  PUBLIC SECTION.
+    CONSTANTS c_subscription_id TYPE string VALUE 'APIM_ILVES_REMOVE_FP'.
+    CONSTANTS c_rfc_dest TYPE rfcdest VALUE 'APIM_ILVES_REMOVE_FP'.
+
+    CONSTANTS GC_ILVESAPI_URI TYPE string VALUE 'forestProperty/remove/?user=GDPRDataDeletionJBossSrvc'.
+    TYPES:
+      BEGIN OF ty_remove_forest_property_resp,
+        success TYPE abap_bool,
+      END OF ty_remove_forest_property_resp .
+    TYPES:
+      BEGIN OF ty_remove_forest_property_req,
+        kitunnus TYPE zzkiid,
+        key      TYPE string,
+      END OF ty_remove_forest_property_req .
+
+    METHODS constructor
+      RAISING
+                zcx_rest_handler .
+    METHODS remove_forest_property_data
+      IMPORTING
+        !iv_kitunnus      TYPE zzkiid
+      RETURNING
+        VALUE(rv_success) TYPE abap_bool
+      RAISING
+        zcx_rest_handler .
+  PROTECTED SECTION.
+    METHODS create_http_client REDEFINITION .
+    METHODS set_http_header_fields REDEFINITION.
+    METHODS create_by_destination REDEFINITION.
+  PRIVATE SECTION.
+
+ENDCLASS.
+
+
+
+CLASS zcl_ilves_api_rest_handler IMPLEMENTATION.
+
+
+  METHOD constructor.
+    super->constructor( iv_subscription_id = c_subscription_id ).
+** Call the init
+    init(  ).
+
+  ENDMETHOD.
+
+
+  METHOD create_http_client.
+
+    create_by_destination( rfc_destination = c_rfc_dest ).
+
+    set_http_header_fields( ).
+
+  ENDMETHOD.
+
+
+
+
+
+
+
+  METHOD remove_forest_property_data.
+***********************************************************************
+* Class           : ZCL_ILVES_API_REST_HANDLER                        *
+* Package         : ZML_SHARED                                        *
+*                                                                     *
+* Author          : Michal Brulinski, Tieto                           *
+*                                                                     *
+* Description     : Implementation of POST method for                 *
+*                   Forest Property Data which actually triggers      *
+*                   deletion/removal on the external system           *
+*                   Build REST call to outside API                    *
+*                   Uses REST client to retrieve the data.            *
+*                                                                     *
+* Change history:                                                     *
+* Date       // Author                    // Description              *
+* ------------------------------------------------------------------- *
+* 18.05.2022 // Michal Brulinski, Tieto   // First version created    *
+*                                                                     *
+***********************************************************************
+    DATA: lr_json            TYPE REF TO /ui2/cl_json,
+          lr_entity          TYPE REF TO if_rest_entity,
+          ls_response_data   TYPE ty_remove_forest_property_resp,
+          ls_request_payload TYPE ty_remove_forest_property_req.
+
+    CHECK me->mr_http_client IS BOUND.
+    CHECK me->mr_rest_client IS BOUND.
+
+
+
+    cl_http_utility=>set_request_uri(
+      EXPORTING
+        request = me->mr_http_client->request
+        uri     = gc_ilvesapi_uri ).
+
+    ls_request_payload-kitunnus = iv_kitunnus.
+*Set the Key
+    ls_request_payload-key = 'PnM7pZ4Pek'.
+
+* Convert data from ABAP dictionary stucture to JSON to pass as request payload
+    /ui2/cl_json=>serialize(
+      EXPORTING
+        data        = ls_request_payload                " Data to serialize
+        pretty_name = /ui2/cl_json=>pretty_mode-camel_case                 " Pretty Print property names
+      RECEIVING
+        r_json      = DATA(lv_payload_json)                 " JSON string
+    ).
+
+* Create rest entity
+    lr_entity = mr_rest_client->if_rest_client~create_request_entity( ).
+    lr_entity->set_content_type( iv_media_type = if_rest_media_type=>gc_appl_json ).
+    lr_entity->set_string_data( lv_payload_json ).
+
+* Call Request
+*    TRY.
+        " POST request
+        me->mr_rest_client->if_rest_client~post( lr_entity ).
+        " Collect response
+        DATA(lo_response) = me->mr_rest_client->if_rest_client~get_response_entity( ).
+
+        DATA(lt_response_headers) = me->mr_rest_client->if_rest_client~get_response_headers( ).
+        DATA(lv_http_status) = lo_response->get_header_field( '~status_code' ).
+
+
+        "Receive the response data in JSON.
+        DATA(lv_string_data) = lo_response->get_string_data( ).
+
+        "request failed -> STOP Processing
+        IF lv_http_status NE 200.
+          zcx_rest_handler=>raise_exc_from_status_code( lv_http_status ).
+        ENDIF.
+
+        " Parse the response into structure
+        IF lv_string_data IS NOT INITIAL.
+          /ui2/cl_json=>deserialize(
+            EXPORTING
+              json = lv_string_data    " JSON string
+            CHANGING
+              data = ls_response_data       " Data to serialize
+          ).
+          rv_success = ls_response_data-success.
+        ENDIF.
+*Close the connection
+        mr_rest_client->if_rest_client~close( ).
+        "exception handling
+*      CATCH cx_rest_client_exception INTO DATA(lo_rest_client_excp).
+*        RAISE EXCEPTION NEW zcx_rest_handler( previous = lo_rest_client_excp ).
+*    ENDTRY.
+
+  ENDMETHOD.
+  METHOD create_by_destination.
+    super->create_by_destination( rfc_destination = rfc_destination ).
+  ENDMETHOD.
+
+
+
+  METHOD set_http_header_fields.
+    super->set_http_header_fields( ).
+  ENDMETHOD.
+
+ENDCLASS.

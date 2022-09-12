@@ -1,2 +1,4 @@
-# abap_rest_sample
-rest sample
+# abap_rest
+
+ABAP rest examples
+How to call REST API in ABAP

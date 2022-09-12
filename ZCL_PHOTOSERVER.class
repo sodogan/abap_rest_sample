@@ -1,0 +1,672 @@
+class ZCL_PHOTOSERVER definition
+  public
+  final
+  create public .
+
+public section.
+
+  types:
+    BEGIN OF ts_photo_id,
+        id TYPE c LENGTH 38,
+      END OF ts_photo_id .
+  types:
+    tt_id    TYPE TABLE OF ts_photo_id-id WITH NON-UNIQUE DEFAULT KEY .
+  types:
+    BEGIN OF s_photolist,
+        id              TYPE c LENGTH 38,
+        name            TYPE c LENGTH 50,
+        mimetype        TYPE c LENGTH 50, ":"image/jpeg",
+        thumbnail       TYPE c LENGTH 200,
+        image           TYPE c LENGTH 200,
+        infotext        TYPE c LENGTH 2000, ":"kuvan tiedot",
+        x               TYPE i,                             ":344534,
+        y               TYPE i,                             ":6807971,
+        object          TYPE c LENGTH 50, ":"kuvio",
+        source_system   TYPE c LENGTH 50, ":"MOBMAP",
+        objectid        TYPE c LENGTH 50,                   ":12345,
+        category        TYPE i, ":4,
+        subcategory     TYPE i, ":1
+        priority        TYPE c LENGTH 10, ":"HIGH
+        photographed_by TYPE c LENGTH 200, ":"hhu
+      END OF s_photolist .
+  types:
+    tt_photolist TYPE TABLE OF s_photolist WITH NON-UNIQUE DEFAULT KEY .
+  types:
+    BEGIN OF ts_photolist,
+        photo    TYPE xstring,
+        metadata TYPE s_photolist,
+      END OF ts_photolist .
+  types:
+    tt_photo TYPE TABLE OF ts_photolist .
+  types:
+    BEGIN OF s_photo_save,
+        name            TYPE c LENGTH 50,
+        mimetype        TYPE c LENGTH 50, ":"image/jpeg",
+        infotext        TYPE c LENGTH 2000, ":"kuvan tiedot",
+        x               TYPE i,                             ":344534,
+        y               TYPE i,                             ":6807971,
+        object          TYPE c LENGTH 50, ":"kuvio",
+        source_system   TYPE c LENGTH 50, ":"MOBMAP",
+        objectid        TYPE c LENGTH 50,                   ":12345,
+        category        TYPE i, ":4,
+        subcategory     TYPE i, ":1
+        priority        TYPE c LENGTH 10, ":"HIGH
+        photographed_by TYPE c LENGTH 200, ":"hhu
+      END OF s_photo_save .
+  types:
+    BEGIN OF ts_photo_save,
+        photo    TYPE xstring,
+        metadata TYPE s_photo_save,
+      END OF ts_photo_save .
+  types:
+    tt_photo_save TYPE TABLE OF ts_photo_save .
+
+  class-methods READ_AL11
+    importing
+      !I_FILENAME type SALFILE-LONGNAME default 'testimage.jpg'
+    exporting
+      !E_FILE type XSTRING .
+  methods CONSTRUCTOR
+    raising
+      ZCX_SIMPLE .
+  methods GET_PHOTO
+    importing
+      !I_URI type STRING
+    exporting
+      !E_PHOTO type XSTRING
+    raising
+      ZCX_SIMPLE .
+  methods GET_PHOTOLIST
+    importing
+      !I_PARAMETERS type STRING
+    exporting
+      !E_PHOTOLIST type TT_PHOTOLIST
+    raising
+      ZCX_SIMPLE .
+  methods INSERT_PHOTO
+    importing
+      !I_PARAMETERS type S_PHOTO_SAVE
+      !I_PHOTO type XSTRING
+    exporting
+      !E_PHOTO_ID type TS_PHOTO_ID
+    raising
+      ZCX_SIMPLE .
+protected section.
+private section.
+
+  data HTTP_CLIENT type ref to IF_HTTP_CLIENT .
+  data REST_CLIENT type ref to CL_REST_HTTP_CLIENT .
+  constants AC_DATA type STRING value '/data' ##NO_TEXT.
+  constants AC_IMAGESERVICE type STRING value '/imageservice' ##NO_TEXT.
+
+  methods CREATE_HTTP_CLIENT
+    exporting
+      !E_RETURN type BAPIRET2 .
+  methods GET_BAPIRET2
+    returning
+      value(R_RETURN) type BAPIRET2 .
+  methods RAISE_EXCEPTION
+    importing
+      !I_STRING type STRING optional
+    raising
+      ZCX_SIMPLE .
+ENDCLASS.
+
+
+
+CLASS ZCL_PHOTOSERVER IMPLEMENTATION.
+
+
+  METHOD constructor.
+    CONSTANTS: lc_dest TYPE rfcdest VALUE 'PHOTOSERVER'.
+
+    DATA: lv_return   TYPE bapiret2,
+          lv_errortxt TYPE string.
+
+*Create http Client object
+    CALL METHOD me->create_http_client
+      IMPORTING
+        e_return = lv_return.
+
+    IF lv_return IS NOT INITIAL.
+      lv_errortxt  = lv_return-message.
+      me->raise_exception( i_string = lv_errortxt ).
+    ENDIF.
+
+*Create REST Client object
+    TRY.
+        CREATE OBJECT me->rest_client
+          EXPORTING
+            io_http_client = me->http_client.
+
+      CATCH cx_rest_client_exception INTO DATA(lo_rest_excep).
+        lv_errortxt = lo_rest_excep->get_longtext( ).
+        me->raise_exception(
+          EXPORTING
+            i_string = lv_errortxt ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD create_http_client.
+    CONSTANTS c_auth TYPE string VALUE 'Authorization' ##NO_TEXT.
+    CONSTANTS c_content_type TYPE string VALUE 'content-type'.
+    CONSTANTS c_accept TYPE string VALUE 'ACCEPT' ##NO_TEXT.
+    CONSTANTS c_accept_value TYPE string VALUE 'application/json'.
+    CONSTANTS c_rfc_dest TYPE rfcdest VALUE 'PHOTOSERVER'.
+    CONSTANTS: gc_e TYPE dd26e-enqmode VALUE 'E'.
+
+    DATA: lv_reason        TYPE string,
+          lv_utc_timestamp TYPE timestampl,
+          ls_return        LIKE e_return.
+
+    DATA: lv_auth_val TYPE string.
+
+*Create the HTTP client instance
+    CALL METHOD cl_http_client=>create_by_destination
+      EXPORTING
+        destination              = c_rfc_dest
+      IMPORTING
+        client                   = me->http_client
+      EXCEPTIONS
+        destination_not_found    = 1
+        internal_error           = 2
+        argument_not_found       = 3
+        destination_no_authority = 4
+        plugin_not_active        = 5
+        OTHERS                   = 5.
+    IF sy-subrc NE 0.
+      GET TIME STAMP FIELD lv_utc_timestamp. "if app log handle needed
+      e_return = me->get_bapiret2( ).
+      RETURN.
+    ENDIF.
+
+    CHECK http_client IS BOUND.
+
+*Set HTTP header fields
+*    me->http_client->request->set_header_field(
+*      EXPORTING
+*        name  = c_auth
+*        value = lv_auth_val ).
+    me->http_client->request->set_header_field(
+      EXPORTING
+        name  = c_accept
+        value = c_accept_value ).
+    me->http_client->request->set_header_field(
+      EXPORTING
+        name  = c_content_type
+        value = c_accept_value ).
+
+*  Set version
+    me->http_client->request->set_version(
+      if_http_request=>co_protocol_version_1_1 ).
+
+  ENDMETHOD.
+
+
+  method GET_BAPIRET2.
+*Wrapper for syst messages
+      CALL FUNCTION 'BALW_BAPIRETURN_GET2'
+        EXPORTING
+          type   = syst-msgty
+          cl     = syst-msgid
+          number = syst-msgno
+          par1   = syst-msgv1
+          par2   = syst-msgv2
+          par3   = syst-msgv3
+          par4   = syst-msgv4
+        IMPORTING
+          return = r_return.
+  endmethod.
+
+
+  method GET_PHOTO.
+***********************************************************************
+* Class           : ZCL_PHOTOSERVER                                   *
+* Package         : ZML_SHARED                                        *
+*                                                                     *
+* Author          : Michael Sittig, Tieto                             *
+*                                                                     *
+* Description     : Gets one photo from external http connection      *
+*                   named PHOTOSERVER.                                *
+*                   Uses REST client to retrieve the data.            *
+*                                                                     *
+* Change history:                                                     *
+* Date       // Author                    // Description              *
+* ------------------------------------------------------------------- *
+* 26.10.2020 // Michael Sittig, Tieto     // First version created    *
+*                                                                     *
+***********************************************************************
+    DATA: lt_photo LIKE e_photo.
+    DATA: lr_json TYPE REF TO /ui2/cl_json.
+
+    DATA: lv_return   TYPE bapiret2,
+          lv_errortxt TYPE string.
+
+    DATA: lv_uri TYPE string.
+
+    lv_uri = i_uri. "'/data/2015-03-15/8/THBa2c42442f5ab4354b2bea2c72e82fd4e.jpg'.
+
+    CHECK me->http_client IS BOUND.
+    CHECK me->rest_client IS BOUND.
+    "todo: check user role
+
+*Call Request
+    cl_http_utility=>set_request_uri(
+      EXPORTING
+        request = me->http_client->request
+        uri     = lv_uri ). "todo: vaihda tähän i_uri
+
+    TRY.
+        me->rest_client->if_rest_client~get( ).
+        DATA(lo_response) = me->rest_client->if_rest_client~get_response_entity( ).
+        DATA(lv_http_status) = lo_response->get_header_field( '~status_code' ).
+
+        "request failed -> STOP Processing
+        IF lv_http_status NE 200.
+          DATA(lv_reason) = lo_response->get_header_field( '~status_reason' ).
+          lv_errortxt = lv_reason.
+          me->raise_exception(
+            EXPORTING
+              i_string = lv_errortxt ).
+        ENDIF.
+
+        "Receive the response data in JSON.
+        DATA(lv_binary_data) = lo_response->get_binary_data( ). "xstring
+        IF me->http_client IS BOUND.
+          me->http_client->refresh_response( ).
+          me->http_client->close( ).
+        ENDIF.
+
+        "exception handling
+      CATCH cx_rest_client_exception INTO DATA(lo_rest_client_excp).
+        lv_errortxt = lo_rest_client_excp->get_longtext( ).
+        me->raise_exception(
+          EXPORTING
+            i_string = lv_errortxt ).
+    ENDTRY.
+
+
+    "While ready, put these below in the Otso class
+    IF lv_binary_data IS NOT INITIAL.
+      e_photo = lv_binary_data.
+    ENDIF.
+  endmethod.
+
+
+  METHOD get_photolist.
+***********************************************************************
+* Class           : ZCL_PHOTOSERVER                                   *
+* Package         : ZML_SHARED                                        *
+*                                                                     *
+* Author          : Michael Sittig, Tieto                             *
+*                                                                     *
+* Description     : Gets list of photos from external http connection *
+*                   named PHOTOSERVER.                                *
+*                   Uses REST client to retrieve the data.            *
+*                                                                     *
+* Change history:                                                     *
+* Date       // Author                    // Description              *
+* ------------------------------------------------------------------- *
+* 26.10.2020 // Michael Sittig, Tieto     // First version created    *
+*                                                                     *
+***********************************************************************
+    CONSTANTS: lc_request TYPE string VALUE '/?request=get_list'.
+
+    DATA: lt_photolist LIKE e_photolist.
+    DATA: lr_json TYPE REF TO /ui2/cl_json.
+
+    DATA: lv_return   TYPE bapiret2,
+          lv_errortxt TYPE string.
+
+    DATA: lv_uri TYPE string.
+
+    CHECK me->http_client IS BOUND.
+    CHECK me->rest_client IS BOUND.
+    "todo: check user role
+
+*Call Request
+    lv_uri = me->ac_imageservice && lc_request && i_parameters.
+    cl_http_utility=>set_request_uri(
+      EXPORTING
+        request = me->http_client->request
+        uri     = lv_uri ).
+
+    TRY.
+        me->rest_client->if_rest_client~get( ).
+        DATA(lo_response) = me->rest_client->if_rest_client~get_response_entity( ).
+        DATA(lv_http_status) = lo_response->get_header_field( '~status_code' ).
+
+        "request failed -> STOP Processing
+        IF lv_http_status NE 200.
+          DATA(lv_reason) = lo_response->get_header_field( '~status_reason' ).
+          lv_errortxt = lv_reason.
+          me->raise_exception(
+            EXPORTING
+              i_string = lv_errortxt ).
+        ENDIF.
+
+        "Receive the response data in JSON.
+        DATA(lv_json_data) = lo_response->get_string_data( ).
+        IF me->http_client IS BOUND.
+          me->http_client->refresh_response( ).
+          me->http_client->close( ).
+        ENDIF.
+
+        "exception handling
+      CATCH cx_rest_client_exception INTO DATA(lo_rest_client_excep).
+        lv_errortxt = lo_rest_client_excep->get_longtext( ).
+        me->raise_exception(
+          EXPORTING
+            i_string = lv_errortxt ).
+    ENDTRY.
+
+    IF lv_json_data IS NOT INITIAL.
+      CREATE OBJECT lr_json.
+      TRY.
+          "parse json to table.
+          lr_json->deserialize_int( EXPORTING json = lv_json_data CHANGING data = lt_photolist ).
+
+          e_photolist = lt_photolist.
+
+        CATCH cx_sy_move_cast_error INTO DATA(lo_move_cast_error) .
+          lv_errortxt = `HTTP GET failed: ` && lo_move_cast_error->get_longtext( ).
+
+          FREE: lo_move_cast_error.
+
+          me->raise_exception(
+           EXPORTING
+             i_string = lv_errortxt ).
+
+      ENDTRY.
+    ENDIF.
+
+    IF lr_json IS BOUND.
+      FREE lr_json.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD insert_photo.
+***********************************************************************
+* Class           : ZCL_PHOTOSERVER                                   *
+* Package         : ZML_SHARED                                        *
+*                                                                     *
+* Author          : Michael Sittig, Tieto                             *
+*                                                                     *
+* Description     : Inserts one photo to external http connection     *
+*                   named PHOTOSERVER.                                *
+*                   Uses REST client to post the data.                *
+*                                                                     *
+* Change history:                                                     *
+* Date       // Author                    // Description              *
+* ------------------------------------------------------------------- *
+* 26.10.2020 // Michael Sittig, Tieto     // First version created    *
+*                                                                     *
+***********************************************************************
+
+    CONSTANTS lc_save_func TYPE string VALUE '/?request=save_image'.
+    CONSTANTS lc_picture TYPE string VALUE 'picture'.
+
+    DATA(lv_request) = me->ac_imageservice && lc_save_func.
+    DATA: lv_photo    TYPE xstring.
+
+    DATA: lo_multipart_entity   TYPE REF TO if_rest_multipart_entity.
+    DATA: lo_post_file          TYPE REF TO cl_rest_multipart_form_data.
+    DATA: lv_rest_entity1       TYPE REF TO if_rest_entity.
+    DATA: lv_rest_entity2       TYPE REF TO if_rest_entity.
+
+    DATA: lr_json       TYPE REF TO /ui2/cl_json,
+          lv_json       TYPE /ui2/cl_json=>json,
+          ls_photo_save LIKE i_parameters.
+
+    DATA: ls_photo_id LIKE e_photo_id.
+
+    DATA: lv_errortxt TYPE string.
+
+    MOVE-CORRESPONDING i_parameters TO ls_photo_save.
+    lv_photo = i_photo.
+*    "-->For testing - Nämä otetaan parametreista
+*    "Set metadata
+*    ls_photo_save-name = 'testimage.jpg'.
+*    ls_photo_save-mimetype = if_rest_media_type=>gc_image_jpeg.
+*    ls_photo_save-infotext = 'Michaelin testikuva 4'.
+*    ls_photo_save-x = '344534'.
+*    ls_photo_save-y = '6807971'.
+*    ls_photo_save-object = 'terminaalitarkastus'.
+*    ls_photo_save-source_system = 'OTSO'.
+*    ls_photo_save-objectid = '12345'.
+*    ls_photo_save-category = '17'.
+**    ls_photo_save-subcategory = '1'. "not needed here
+*    ls_photo_save-priority = 'NORMAL'.
+*    ls_photo_save-photographed_by = 'MS'.
+*
+*
+*    "Get photo from AL11
+*    me->read_al11(
+*      EXPORTING
+*        i_filename = 'testimage.jpg'
+*      IMPORTING
+*        e_file     = lv_photo
+*    ).
+*    "<--For testing - Nämä otetaan parametreista
+
+
+    CHECK me->http_client IS BOUND.
+    CHECK me->rest_client IS BOUND.
+    cl_http_utility=>set_request_uri(
+      EXPORTING
+        request = me->http_client->request
+        uri     = lv_request
+    ).
+
+**************
+    TRY.
+
+        DATA lv_definition TYPE string.
+        lv_definition = if_rest_media_type=>gc_multipart_form_data && '; boundary=ImageBoundary'.
+
+
+        lo_multipart_entity ?= me->rest_client->if_rest_client~create_request_entity(
+          iv_multipart = abap_true ).
+
+        lo_multipart_entity->set_content_type(
+           iv_media_type = lv_definition
+        ).
+
+        DATA(lt_multiheaders) = lo_multipart_entity->get_header_fields( ).
+
+        "Create multipart entity 1 (json metadata)
+        "-------------------------
+        lo_multipart_entity->create_entity(
+          EXPORTING
+            iv_multipart  = abap_false         " Create a Multipart Entity
+          RECEIVING
+            ro_entity     = lv_rest_entity1   " REST Entity
+        ).
+
+        lv_rest_entity1->set_header_field(
+          EXPORTING
+            iv_name  = if_http_header_fields=>content_disposition
+            iv_value = 'form-data; name="json"'
+        ).
+
+        "generate json from abap object
+        CREATE OBJECT lr_json.
+
+        lr_json->serialize(
+          EXPORTING
+            data             =    ls_photo_save "ls_photo_save
+            pretty_name      =     /ui2/cl_json=>pretty_mode-low_case
+          RECEIVING
+            r_json           =     lv_json
+        ).
+
+        lv_rest_entity1->set_string_data( iv_data = lv_json ).
+
+        CREATE OBJECT lo_post_file.
+
+        DATA: lv_filename TYPE string,
+              lv_type     TYPE string.
+        lv_filename = ls_photo_save-name.
+        lv_type = ls_photo_save-mimetype.
+        CALL METHOD lo_post_file->set_file
+          EXPORTING
+            iv_name     = lc_picture                        "static (don't change)
+            iv_filename = lv_filename                       "dynamic
+            iv_type     = lv_type                           "dynamic
+            iv_data     = lv_photo.                         "dynamic -> i_photo
+
+        CALL METHOD lo_post_file->if_rest_entity_provider~write_to
+          EXPORTING
+            io_entity = lo_multipart_entity.
+
+        "Send post request
+        "-------------------------
+        me->rest_client->if_rest_resource~post( io_entity = lo_multipart_entity ).
+
+        "get response
+        "-------------------------
+        DATA(lo_response) = me->rest_client->if_rest_client~get_response_entity( ).
+        DATA(lo_headers) = lo_response->get_header_fields( ).
+        DATA(lv_http_status) = lo_response->get_header_field( '~status_code' ).
+
+        "request failed -> STOP Processing
+        IF lv_http_status NE 200.
+          DATA(lv_reason) = lo_response->get_header_field( '~status_reason' ).
+          lv_errortxt = lv_reason.
+          me->raise_exception(
+            EXPORTING
+              i_string = lv_errortxt ).
+        ENDIF.
+
+        "Receive the response data in JSON.
+        DATA(lv_json_data) = lo_response->get_string_data( ).
+
+        IF me->http_client IS BOUND.
+          me->http_client->refresh_response( ).
+          me->http_client->close( ).
+        ENDIF.
+
+      CATCH cx_rest_client_exception INTO DATA(lo_rest_client_excep).
+        lv_errortxt = lo_rest_client_excep->get_longtext( ).
+        me->raise_exception(
+          EXPORTING
+            i_string = lv_errortxt ).
+    ENDTRY.
+
+    IF lv_json_data IS NOT INITIAL.
+      "parse json to structure.
+      "get rid of the trailing characters, for example #
+      SEARCH lv_json_data FOR '}'.
+      IF sy-subrc = 0.
+        DATA(lv_pos) = sy-fdpos + 1. "now SY-FDPOS contains the position of json enclosing.
+        lv_json_data = lv_json_data+0(lv_pos).
+
+        TRY.
+            lr_json->deserialize( EXPORTING json = lv_json_data CHANGING data = ls_photo_id ).
+
+            IF ls_photo_id-id IS NOT INITIAL.
+              e_photo_id = ls_photo_id. "success
+            ELSE.
+              lv_errortxt = 'HTTP POST failed: Photo id not valuated'.
+              me->raise_exception(
+                EXPORTING
+                  i_string = lv_errortxt ).
+            ENDIF.
+
+          CATCH cx_sy_move_cast_error INTO DATA(lo_move_cast_error) .
+            lv_errortxt = 'HTTP POST failed: ' && lo_move_cast_error->get_longtext( ).
+
+            FREE: lo_move_cast_error.
+
+            me->raise_exception(
+              EXPORTING
+                i_string = lv_errortxt ).
+
+        ENDTRY.
+      ELSE.
+        lv_errortxt = 'HTTP POST failed: ' && lv_json_data.
+        me->raise_exception(
+          EXPORTING
+            i_string = lv_errortxt ).
+      ENDIF.
+
+    ENDIF.
+
+
+  ENDMETHOD.
+
+
+  METHOD raise_exception.
+    RAISE EXCEPTION TYPE zcx_simple
+      EXPORTING
+        text     = i_string.
+    .
+
+  ENDMETHOD.
+
+
+  METHOD read_al11.
+
+    CONSTANTS: c_dir TYPE salfile-longname VALUE '/usr/sap/WSD/interface'.
+
+    DATA: lv_message     TYPE string,
+          lv_longdirname TYPE eps2path,
+          lt_linetable   TYPE TABLE OF spflist,
+          lv_xstring      TYPE xstring.
+
+    DATA : lt_data_b TYPE TABLE OF x255.
+    DATA : wa_line TYPE x255.
+    data : filename TYPE string.
+    filename = '/usr/sap/WSD/interface/testimage.jpg'.
+
+    REFRESH lt_data_b.
+    OPEN DATASET filename FOR INPUT IN BINARY MODE.
+    IF sy-subrc = 0.
+      DO.
+        READ DATASET filename INTO wa_line.
+        IF sy-subrc = 0.
+          APPEND wa_line TO lt_data_b.
+        ELSE.
+          APPEND wa_line TO lt_data_b.
+          EXIT.
+        ENDIF.
+      ENDDO.
+    ENDIF.
+    CLOSE DATASET filename.
+
+
+    IF sy-subrc = 0.
+      DATA lv_filesize TYPE epsf-epsfilsiz.
+      CALL FUNCTION 'EPS_GET_FILE_ATTRIBUTES'
+        EXPORTING
+         file_name        = 'testimage.jpg'
+         dir_name         = '/usr/sap/WSD/interface'
+        IMPORTING
+          file_size        = lv_filesize.
+
+      IF lv_filesize > 0.
+        CALL FUNCTION 'SCMS_BINARY_TO_XSTRING'
+          EXPORTING
+            input_length = lv_filesize
+          IMPORTING
+            buffer       = lv_xstring
+          TABLES
+            binary_tab   = lt_data_b[]
+          EXCEPTIONS
+            failed       = 1
+            OTHERS       = 2.
+        IF sy-subrc = 0.
+          e_file = lv_xstring.
+        ENDIF.
+      ENDIF.
+
+      data(lv_string) = /UI2/CL_JSON=>xstring_to_string( in = lv_xstring ).
+
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,386 @@
+class ZCL_ILVES_STAND definition
+  public
+  final
+  create public .
+
+public section.
+
+  types:
+    BEGIN OF ts_kiresponse,
+        success TYPE abap_bool,
+        data    TYPE ZZKIID,
+      END OF ts_kiresponse .
+  types:
+    tt_kiresponse TYPE TABLE OF ts_kiresponse WITH NON-UNIQUE DEFAULT KEY .
+
+  methods CONSTRUCTOR
+    raising
+      ZCX_SIMPLE .
+  methods GET_KITUNNUS
+    importing
+      !I_STANDID type ZZSTANDID10
+    returning
+      value(E_KITUNNUS) type ZZKIID
+    raising
+      ZCX_SIMPLE .
+  methods GET_STANDINFO_HARV
+    importing
+      !IS_ZWSFRDBSH type ZWSFRDBSH_S
+    returning
+      value(RT_STANDINFO) type ZSTANDID_KITUNNUS_TAB
+    raising
+      ZCX_SIMPLE .
+  methods SET_STANDINFO
+    changing
+      value(CT_STANDINFO) type ZSTANDID_KITUNNUS_TAB
+    raising
+      ZCX_SIMPLE .
+  methods GET_STANDINFO_SILV
+    importing
+      !IS_ZWSFRDBSS type ZWSFRDBSS_S
+    returning
+      value(RT_STANDINFO) type ZSTANDID_KITUNNUS_TAB
+    raising
+      ZCX_SIMPLE .
+protected section.
+private section.
+
+  data HTTP_CLIENT type ref to IF_HTTP_CLIENT .
+  data REST_CLIENT type ref to CL_REST_HTTP_CLIENT .
+  constants AC_KITUNNUS type STRING value '/kitunnus' ##NO_TEXT.
+
+  methods CREATE_HTTP_CLIENT
+    exporting
+      !E_RETURN type BAPIRET2 .
+  methods GET_BAPIRET2
+    returning
+      value(R_RETURN) type BAPIRET2 .
+  methods RAISE_EXCEPTION
+    importing
+      !I_STRING type STRING optional
+    raising
+      ZCX_SIMPLE .
+ENDCLASS.
+
+
+
+CLASS ZCL_ILVES_STAND IMPLEMENTATION.
+
+
+  METHOD CONSTRUCTOR.
+    CONSTANTS: lc_dest TYPE rfcdest VALUE 'ILVESSTAND'.
+
+    DATA: lv_return   TYPE bapiret2,
+          lv_errortxt TYPE string.
+
+*Create http Client object
+    CALL METHOD me->create_http_client
+      IMPORTING
+        e_return = lv_return.
+
+    IF lv_return IS NOT INITIAL.
+      lv_errortxt  = lv_return-message.
+      me->raise_exception( i_string = lv_errortxt ).
+    ENDIF.
+
+*Create REST Client object
+    TRY.
+        CREATE OBJECT me->rest_client
+          EXPORTING
+            io_http_client = me->http_client.
+
+      CATCH cx_rest_client_exception INTO DATA(lo_rest_excep).
+        lv_errortxt = lo_rest_excep->get_longtext( ).
+        me->raise_exception(
+          EXPORTING
+            i_string = lv_errortxt ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD CREATE_HTTP_CLIENT.
+    CONSTANTS c_auth TYPE string VALUE 'Authorization' ##NO_TEXT.
+    CONSTANTS c_content_type TYPE string VALUE 'content-type'.
+    CONSTANTS c_accept TYPE string VALUE 'ACCEPT' ##NO_TEXT.
+    CONSTANTS c_accept_value TYPE string VALUE 'application/json'.
+    CONSTANTS c_rfc_dest TYPE rfcdest VALUE 'ILVESSTAND'.
+
+    DATA: lv_reason        TYPE string,
+          lv_utc_timestamp TYPE timestampl,
+          ls_return        LIKE e_return.
+
+    DATA: lv_auth_val TYPE string.
+
+*Create the HTTP client instance
+    CALL METHOD cl_http_client=>create_by_destination
+      EXPORTING
+        destination              = c_rfc_dest
+      IMPORTING
+        client                   = me->http_client
+      EXCEPTIONS
+        destination_not_found    = 1
+        internal_error           = 2
+        argument_not_found       = 3
+        destination_no_authority = 4
+        plugin_not_active        = 5
+        OTHERS                   = 5.
+    IF sy-subrc NE 0.
+      GET TIME STAMP FIELD lv_utc_timestamp. "if app log handle needed
+      e_return = me->get_bapiret2( ).
+      RETURN.
+    ENDIF.
+
+    CHECK me->http_client IS BOUND.
+
+*Set HTTP header fields
+*    me->http_client->request->set_header_field(
+*      EXPORTING
+*        name  = c_auth
+*        value = lv_auth_val ).
+    me->http_client->request->set_header_field(
+      EXPORTING
+        name  = c_accept
+        value = c_accept_value ).
+    me->http_client->request->set_header_field(
+      EXPORTING
+        name  = c_content_type
+        value = c_accept_value ).
+
+*  Set version
+    me->http_client->request->set_version(
+      if_http_request=>co_protocol_version_1_1 ).
+
+  ENDMETHOD.
+
+
+  method GET_BAPIRET2.
+*Wrapper for syst messages
+      CALL FUNCTION 'BALW_BAPIRETURN_GET2'
+        EXPORTING
+          type   = syst-msgty
+          cl     = syst-msgid
+          number = syst-msgno
+          par1   = syst-msgv1
+          par2   = syst-msgv2
+          par3   = syst-msgv3
+          par4   = syst-msgv4
+        IMPORTING
+          return = r_return.
+  endmethod.
+
+
+  METHOD get_kitunnus.
+***********************************************************************
+* Class           : ZCL_ILVES_STAND                                   *
+* Package         : ZML_SHARED                                        *
+*                                                                     *
+* Author          : Michael Sittig, Tieto                             *
+*                                                                     *
+* Description     : Gets kitunnus from external http connection       *
+*                   named ILVESSTAND.                                *
+*                   Uses REST client to retrieve the data.            *
+*                                                                     *
+* Change history:                                                     *
+* Date       // Author                    // Description              *
+* ------------------------------------------------------------------- *
+* 07.12.2020 // Michael Sittig, Tieto     // First version created    *
+*                                                                     *
+***********************************************************************
+    DATA: lr_json       TYPE REF TO /ui2/cl_json,
+          ls_kiresponse TYPE ts_kiresponse.
+
+    DATA: lv_return   TYPE bapiret2,
+          lv_errortxt TYPE string.
+
+    DATA: lv_uri TYPE string.
+
+    lv_uri = i_standid && ac_kitunnus.
+
+    CHECK me->http_client IS BOUND.
+    CHECK me->rest_client IS BOUND.
+    "todo: check user role
+
+*Call Request
+    cl_http_utility=>set_request_uri(
+      EXPORTING
+        request = me->http_client->request
+        uri     = lv_uri ).
+
+    TRY.
+        me->rest_client->if_rest_client~get( ).
+        DATA(lo_response) = me->rest_client->if_rest_client~get_response_entity( ).
+        DATA(lv_http_status) = lo_response->get_header_field( '~status_code' ).
+
+        "request failed -> STOP Processing
+        IF lv_http_status NE 200.
+          DATA(lv_reason) = lo_response->get_header_field( '~status_reason' ).
+          lv_errortxt = lv_reason.
+          me->raise_exception(
+            EXPORTING
+              i_string = lv_errortxt ).
+        ENDIF.
+
+        "Receive the response data in JSON.
+        DATA(lv_json_data) = lo_response->get_string_data( ).
+        IF me->http_client IS BOUND.
+          me->http_client->refresh_response( ).
+          me->http_client->close( ).
+        ENDIF.
+
+        "exception handling
+      CATCH cx_rest_client_exception INTO DATA(lo_rest_client_excp).
+        lv_errortxt = lo_rest_client_excp->get_longtext( ).
+        me->raise_exception(
+          EXPORTING
+            i_string = lv_errortxt ).
+    ENDTRY.
+
+
+    IF lv_json_data IS NOT INITIAL.
+      CREATE OBJECT lr_json.
+      TRY.
+          "parse json to table.
+          lr_json->deserialize( EXPORTING json = lv_json_data CHANGING data = ls_kiresponse ).
+
+          IF ls_kiresponse-success EQ abap_true.
+            e_kitunnus = ls_kiresponse-data.
+          ENDIF.
+
+        CATCH cx_sy_move_cast_error INTO DATA(lo_move_cast_error) .
+          lv_errortxt = `HTTP GET failed: ` && lo_move_cast_error->get_longtext( ).
+
+          FREE: lo_move_cast_error.
+
+          me->raise_exception(
+           EXPORTING
+             i_string = lv_errortxt ).
+
+      ENDTRY.
+    ENDIF.
+
+    IF lr_json IS BOUND.
+      FREE lr_json.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_standinfo_harv.
+    DATA: lt_zwsfrdbsh TYPE TABLE OF zwsfrdbsh,
+          lt_standinfo LIKE rt_standinfo.
+
+    SELECT * FROM zwsfrdbsh INTO TABLE lt_zwsfrdbsh
+      WHERE ebeln    = is_zwsfrdbsh-ebeln AND
+            lohkonro = is_zwsfrdbsh-lohkonro.
+
+    IF sy-subrc EQ 0.
+      MOVE-CORRESPONDING lt_zwsfrdbsh TO lt_standinfo.
+      SORT lt_standinfo ASCENDING BY stand.
+
+      TRY.
+          LOOP AT lt_standinfo ASSIGNING FIELD-SYMBOL(<ls_line>).
+            <ls_line>-kitunnus = me->get_kitunnus( <ls_line>-standid ).
+          ENDLOOP.
+
+        CATCH zcx_simple INTO DATA(lo_exception).
+          IF <ls_line> IS ASSIGNED.
+            UNASSIGN <ls_line>.
+          ENDIF.
+          RAISE EXCEPTION TYPE zcx_simple
+            EXPORTING
+              previous = lo_exception.
+
+      ENDTRY.
+
+      IF <ls_line> IS ASSIGNED.
+        UNASSIGN <ls_line>.
+      ENDIF.
+
+    ENDIF.
+
+    rt_standinfo[] = lt_standinfo[].
+
+  ENDMETHOD.
+
+
+  METHOD get_standinfo_silv.
+    DATA: lt_zwsfrdbss TYPE TABLE OF zwsfrdbss,
+          lt_standinfo LIKE rt_standinfo.
+
+    SELECT * FROM zwsfrdbss INTO TABLE lt_zwsfrdbss
+      WHERE mhobject = is_zwsfrdbss-mhobject AND
+            workingsite = is_zwsfrdbss-workingsite AND
+            workingsitetype = is_zwsfrdbss-workingsitetype.
+
+    IF sy-subrc EQ 0.
+      MOVE-CORRESPONDING lt_zwsfrdbss TO lt_standinfo.
+      SORT lt_standinfo ASCENDING BY stand.
+
+      TRY.
+          LOOP AT lt_standinfo ASSIGNING FIELD-SYMBOL(<ls_line>).
+            <ls_line>-kitunnus = me->get_kitunnus( <ls_line>-standid ).
+          ENDLOOP.
+
+        CATCH zcx_simple INTO DATA(lo_exception).
+          IF <ls_line> IS ASSIGNED.
+            UNASSIGN <ls_line>.
+          ENDIF.
+          RAISE EXCEPTION TYPE zcx_simple
+            EXPORTING
+              previous = lo_exception.
+
+      ENDTRY.
+
+      IF <ls_line> IS ASSIGNED.
+        UNASSIGN <ls_line>.
+      ENDIF.
+
+    ENDIF.
+
+    rt_standinfo[] = lt_standinfo[].
+
+  ENDMETHOD.
+
+
+  METHOD RAISE_EXCEPTION.
+    RAISE EXCEPTION TYPE zcx_simple
+      EXPORTING
+        text     = i_string.
+    .
+
+  ENDMETHOD.
+
+
+  METHOD SET_STANDINFO.
+    DATA: lt_standinfo LIKE ct_standinfo.
+
+
+    IF sy-subrc EQ 0.
+      MOVE-CORRESPONDING ct_standinfo TO lt_standinfo.
+      SORT lt_standinfo ASCENDING BY stand.
+
+      TRY.
+          LOOP AT lt_standinfo ASSIGNING FIELD-SYMBOL(<ls_line>).
+            <ls_line>-kitunnus = me->get_kitunnus( <ls_line>-standid ).
+          ENDLOOP.
+
+        CATCH zcx_simple INTO DATA(lo_exception).
+          IF <ls_line> IS ASSIGNED.
+            UNASSIGN <ls_line>.
+          ENDIF.
+          RAISE EXCEPTION TYPE zcx_simple
+            EXPORTING
+              previous = lo_exception.
+
+      ENDTRY.
+
+      IF <ls_line> IS ASSIGNED.
+        UNASSIGN <ls_line>.
+      ENDIF.
+
+    ENDIF.
+
+    ct_standinfo[] = lt_standinfo[].
+
+  ENDMETHOD.
+ENDCLASS.
